@@ -53,5 +53,11 @@ data/phishing-paths.txt
 # Reports (may contain case-specific IOC data)
 Rapporten/
 
+# Case directories (created by 'lookout new', contain investigation data)
+# Any directory with a case.json is a case directory — never commit these
+CASE-*/
+case-*/
+test-*/
+
 # Internal documentation (org setup, procedures)
 docs/

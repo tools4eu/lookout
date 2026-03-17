@@ -1684,6 +1684,14 @@ def new(
         console.print(f"[red]Error creating directory structure:[/red] {e}")
         raise typer.Exit(1)
 
+    # Write .gitignore to prevent case data from being committed
+    (case_dir / ".gitignore").write_text(
+        "# This is a Lookout case directory.\n"
+        "# Case data should NEVER be committed to a git repository.\n"
+        "*\n",
+        encoding="utf-8",
+    )
+
     # Write case.json
     case_metadata = {
         "name": name,
