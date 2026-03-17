@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -699,6 +700,125 @@ def output_json(result: InvestigationResult, output_path: Optional[Path] = None)
 
 
 # ---------------------------------------------------------------------------
+# Case management helpers
+# ---------------------------------------------------------------------------
+
+def _detect_case_dir() -> Optional[Path]:
+    """Check if the current working directory (or a parent) contains a case.json file.
+
+    Returns the path to the case directory if found, otherwise None.
+    Looks in the current directory first, then one level up (to handle subdirectory runs).
+    """
+    cwd = Path.cwd()
+    for candidate in (cwd, cwd.parent):
+        if (candidate / "case.json").exists():
+            return candidate
+    return None
+
+
+def _update_case_json(case_dir: Path, indicator: str) -> None:
+    """Add an indicator to the indicators_investigated list in case.json.
+
+    Args:
+        case_dir: Path to the case directory containing case.json.
+        indicator: The indicator value to record.
+    """
+    case_json_path = case_dir / "case.json"
+    if not case_json_path.exists():
+        return
+    try:
+        data = json.loads(case_json_path.read_text(encoding="utf-8"))
+        investigated = data.get("indicators_investigated", [])
+        if indicator not in investigated:
+            investigated.append(indicator)
+        data["indicators_investigated"] = investigated
+        case_json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except (json.JSONDecodeError, OSError):
+        pass  # Non-fatal — do not interrupt the command
+
+
+def _auto_save_to_case(
+    case_dir: Path,
+    subdirectory: str,
+    filename: str,
+    content: str,
+) -> Path:
+    """Save content to a file inside a case subdirectory.
+
+    Args:
+        case_dir: Root case directory.
+        subdirectory: Subdirectory within the case dir (e.g. 'reports' or 'data').
+        filename: Target filename.
+        content: Text content to write.
+
+    Returns:
+        The resolved output path.
+    """
+    target_dir = case_dir / subdirectory
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / filename
+    target_path.write_text(content, encoding="utf-8")
+    return target_path
+
+
+# ---------------------------------------------------------------------------
+# Next-steps tips
+# ---------------------------------------------------------------------------
+
+def _print_next_steps(command: str, context: dict) -> None:
+    """Print contextual suggestions after a command finishes.
+
+    Args:
+        command: The name of the command that just ran ('investigate', 'enumerate',
+                 'dirscan', 'detect', 'new').
+        context: Dict with optional keys: 'value', 'indicator_type', 'domain',
+                 'pivot_value', 'case_dir'.
+    """
+    console.print()
+    console.print("[dim]Next steps:[/dim]")
+
+    value = context.get("value", "<value>")
+    indicator_type = context.get("indicator_type", "")
+    case_dir = context.get("case_dir", "")
+
+    if command == "detect":
+        console.print(f"  [bold cyan]lookout investigate {value}[/bold cyan]         Run a full investigation")
+        console.print(f"  [bold cyan]lookout investigate {value} --help[/bold cyan]  See all investigation options")
+
+    elif command == "investigate":
+        if indicator_type == "ip":
+            domain = context.get("domain", "<domain>")
+            console.print(f"  [bold cyan]lookout investigate {domain}[/bold cyan]        Investigate associated domains")
+            console.print(f"  [bold cyan]lookout investigate {value} -o report.json[/bold cyan]   Save report")
+        else:
+            # domain / URL / hash
+            pivot = context.get("pivot_value", "<pivot-value>")
+            console.print(f"  [bold cyan]lookout enumerate {value}[/bold cyan]                  Find more subdomains")
+            console.print(f"  [bold cyan]lookout dirscan {value}[/bold cyan]                    Scan for exposed paths/panels")
+            console.print(f"  [bold cyan]lookout investigate {pivot}[/bold cyan]           Investigate a pivot indicator")
+            console.print(
+                f"  [bold cyan]lookout investigate {value} --format json --output report.json[/bold cyan]   Save report"
+            )
+
+    elif command == "enumerate":
+        subdomain = context.get("subdomain", "<subdomain>")
+        console.print(f"  [bold cyan]lookout investigate {subdomain}[/bold cyan]     Check a found subdomain")
+        console.print(f"  [bold cyan]lookout dirscan {value}[/bold cyan]            Scan for exposed paths")
+
+    elif command == "dirscan":
+        console.print(f"  [bold cyan]lookout investigate {value}[/bold cyan]        Full investigation if not done yet")
+        console.print(f"  [bold cyan]lookout enumerate {value}[/bold cyan]          Find more subdomains")
+
+    elif command == "new":
+        case_name = context.get("case_name", value)
+        console.print(f"  [bold cyan]cd {case_name}[/bold cyan]")
+        console.print(f"  [bold cyan]lookout investigate <indicator>[/bold cyan]     Start investigating")
+        console.print(f"  [bold cyan]lookout detect <value>[/bold cyan]              Check what type an indicator is")
+
+    console.print()
+
+
+# ---------------------------------------------------------------------------
 # CLI commands
 # ---------------------------------------------------------------------------
 
@@ -728,6 +848,12 @@ def investigate(
         "-v",
         help="Show detailed output per source",
     ),
+    case: Optional[Path] = typer.Option(
+        None,
+        "--case",
+        "-C",
+        help="Case directory — auto-save report to <case-dir>/reports/ and update case.json",
+    ),
 ) -> None:
     """
     Investigate an indicator (domain, IP, hash, or URL).
@@ -746,6 +872,13 @@ def investigate(
         raise typer.Exit(1)
 
     console.print(f"[dim]Detected type: {indicator_type.value}[/dim]")
+
+    # Auto-detect case directory if --case not specified
+    effective_case = case
+    if effective_case is None:
+        effective_case = _detect_case_dir()
+        if effective_case is not None:
+            console.print(f"[dim]Case directory detected: {effective_case}[/dim]")
 
     # Run investigation
     async def run_investigation() -> InvestigationResult:
@@ -776,6 +909,44 @@ def investigate(
         if output:
             output_json(result, output)
 
+    # Auto-save to case directory
+    if effective_case is not None:
+        safe_value = value.replace("/", "_").replace(":", "_").replace("\\", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_gen = ReportGenerator()
+        report = report_gen.create_report(result)
+        md_content = report_gen.to_markdown(report)
+        pivots_md = _generate_pivot_markdown(result)
+        if pivots_md:
+            md_content += "\n" + pivots_md
+        md_content = md_content.replace("*Generated by OSINT Tool*", "*Generated by Lookout*")
+        filename = f"investigate_{safe_value}_{timestamp}.md"
+        saved_path = _auto_save_to_case(effective_case, "reports", filename, md_content)
+        console.print(f"[dim]Report auto-saved to {saved_path}[/dim]")
+        _update_case_json(effective_case, value)
+
+    # Next steps
+    pivot_value = "<pivot-value>"
+    # Try to extract the top pivot from results for a more useful tip
+    try:
+        from osint.models.results import CrtshResult, URLScanResult, ShodanResult
+        for _src, _api_result in result.results.items():
+            if _api_result and _api_result.success:
+                if isinstance(_api_result, URLScanResult) and _api_result.page_ip:
+                    pivot_value = _api_result.page_ip
+                    break
+                if isinstance(_api_result, CrtshResult) and _api_result.subdomains:
+                    pivot_value = _api_result.subdomains[0]
+                    break
+    except Exception:
+        pass
+
+    _print_next_steps("investigate", {
+        "value": value,
+        "indicator_type": indicator_type.value,
+        "pivot_value": pivot_value,
+    })
+
 
 @app.command()
 def detect(
@@ -788,6 +959,8 @@ def detect(
     except DetectionError as e:
         console.print(f"[red]Could not detect type:[/red] {e}")
         raise typer.Exit(1)
+
+    _print_next_steps("detect", {"value": value})
 
 
 @app.command()
@@ -827,6 +1000,12 @@ def enumerate(
         "--yes",
         "-y",
         help="Skip the OPSEC warning confirmation",
+    ),
+    case: Optional[Path] = typer.Option(
+        None,
+        "--case",
+        "-C",
+        help="Case directory — auto-save results to <case-dir>/data/ and update case.json",
     ),
 ) -> None:
     """
@@ -982,19 +1161,31 @@ def enumerate(
         for ip, count in sorted(shared_ips.items(), key=lambda x: x[1], reverse=True):
             console.print(f"  {ip} -> {count} subdomains", style="yellow" if count > 3 else "dim")
 
-    # Tip
-    if enum_result.resolved:
-        top = enum_result.resolved[0]
-        console.print(
-            f"\n[dim]Tip: run [bold]lookout investigate {top.subdomain}[/bold] "
-            f"to check a subdomain[/dim]"
-        )
-
     # Save to file
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(enum_result.to_dict(), indent=2, default=str))
         console.print(f"\n[green]Results saved to {output}[/green]")
+
+    # Auto-detect case directory if --case not specified
+    effective_case = case
+    if effective_case is None:
+        effective_case = _detect_case_dir()
+        if effective_case is not None:
+            console.print(f"[dim]Case directory detected: {effective_case}[/dim]")
+
+    # Auto-save to case directory
+    if effective_case is not None and enum_result.resolved:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"enumerate_{domain}_{timestamp}.json"
+        content = json.dumps(enum_result.to_dict(), indent=2, default=str)
+        saved_path = _auto_save_to_case(effective_case, "data", filename, content)
+        console.print(f"[dim]Results auto-saved to {saved_path}[/dim]")
+        _update_case_json(effective_case, domain)
+
+    # Next steps
+    first_sub = enum_result.resolved[0].subdomain if enum_result.resolved else "<subdomain>"
+    _print_next_steps("enumerate", {"value": domain, "subdomain": first_sub})
 
 
 @app.command()
@@ -1037,6 +1228,12 @@ def dirscan(
         "--yes",
         "-y",
         help="Skip the OPSEC warning confirmation",
+    ),
+    case: Optional[Path] = typer.Option(
+        None,
+        "--case",
+        "-C",
+        help="Case directory — auto-save results to <case-dir>/data/ and update case.json",
     ),
 ) -> None:
     """
@@ -1249,6 +1446,26 @@ def dirscan(
         output.write_text(json.dumps(scan_result.to_dict(), indent=2, default=str))
         console.print(f"\n[green]Results saved to {output}[/green]")
 
+    # Auto-detect case directory if --case not specified
+    effective_case = case
+    if effective_case is None:
+        effective_case = _detect_case_dir()
+        if effective_case is not None:
+            console.print(f"[dim]Case directory detected: {effective_case}[/dim]")
+
+    # Auto-save to case directory
+    if effective_case is not None and scan_result.found:
+        safe_target = target.replace("/", "_").replace(":", "_").replace("\\", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"dirscan_{safe_target}_{timestamp}.json"
+        content = json.dumps(scan_result.to_dict(), indent=2, default=str)
+        saved_path = _auto_save_to_case(effective_case, "data", filename, content)
+        console.print(f"[dim]Results auto-saved to {saved_path}[/dim]")
+        _update_case_json(effective_case, target)
+
+    # Next steps
+    _print_next_steps("dirscan", {"value": target})
+
 
 # ---------------------------------------------------------------------------
 # Cache commands
@@ -1394,6 +1611,80 @@ def config_reload() -> None:
     """Reload configuration from files."""
     reload_settings()
     console.print("[green]Configuration reloaded[/green]")
+
+
+@app.command()
+def new(
+    name: str = typer.Argument(..., help="Case name (used as directory name, e.g. phishing-example-com)"),
+    description: str = typer.Option(
+        "",
+        "--description",
+        "-d",
+        help="Optional short description of the case",
+    ),
+) -> None:
+    """
+    Create a new case directory structure.
+
+    Creates a case directory with standard subdirectories and a case.json
+    metadata file. Run this before starting an investigation to keep all
+    artifacts organized in one place.
+
+    Examples:
+        lookout new phishing-example-com
+        lookout new phishing-example-com -d "Phishing kit targeting example.com customers"
+    """
+    case_dir = Path.cwd() / name
+
+    if case_dir.exists():
+        console.print(f"[red]Error:[/red] Directory '{name}' already exists.")
+        raise typer.Exit(1)
+
+    # Create directory structure
+    subdirs = ["reports", "data", "evidence"]
+    try:
+        case_dir.mkdir(parents=True)
+        for subdir in subdirs:
+            (case_dir / subdir).mkdir()
+    except OSError as e:
+        console.print(f"[red]Error creating directory structure:[/red] {e}")
+        raise typer.Exit(1)
+
+    # Write case.json
+    case_metadata = {
+        "name": name,
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "description": description,
+        "indicators_investigated": [],
+        "status": "open",
+    }
+    try:
+        (case_dir / "case.json").write_text(
+            json.dumps(case_metadata, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        console.print(f"[red]Error writing case.json:[/red] {e}")
+        raise typer.Exit(1)
+
+    # Confirm creation
+    console.print(f"\n[green]Case directory created:[/green] {case_dir}")
+    console.print()
+
+    tree_table = Table(show_header=False, box=None, padding=(0, 1))
+    tree_table.add_column("", style="cyan")
+    tree_table.add_column("", style="dim")
+    tree_table.add_row(f"{name}/", "")
+    tree_table.add_row("  reports/", "Investigation reports (md, json, docx)")
+    tree_table.add_row("  data/", "Enumeration results, raw data")
+    tree_table.add_row("  evidence/", "Screenshots, samples, exports")
+    tree_table.add_row("  case.json", "Case metadata and investigated indicators")
+    console.print(tree_table)
+
+    if description:
+        console.print(f"\n[dim]Description:[/dim] {description}")
+
+    _print_next_steps("new", {"case_name": name})
 
 
 @app.command()

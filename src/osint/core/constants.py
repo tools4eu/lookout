@@ -94,6 +94,7 @@ class OutputFormat(str, Enum):
     JSON = "json"
     MARKDOWN = "markdown"
     TABLE = "table"
+    DOCX = "docx"
 
     def __str__(self) -> str:
         return self.value

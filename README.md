@@ -98,21 +98,62 @@ cp .env.example .env
 lookout investigate example.com
 ```
 
+## Typical Investigation Workflow
+
+Lookout is designed to guide you through an investigation step by step. After each command, it suggests logical next steps.
+
+```bash
+# Step 1: Create a case to keep everything organized
+lookout new "phishing-example-com" -d "Suspicious domain from spam report"
+
+# Step 2: Move into the case directory
+cd phishing-example-com
+
+# Step 3: Investigate the domain (passive — target cannot see you)
+lookout investigate suspicious-domain.com
+
+# Step 4: Lookout shows results + suggests next steps:
+#   → enumerate to find subdomains
+#   → dirscan to look for exposed panels
+#   → investigate a pivot IP or subdomain
+
+# Step 5: Find subdomains (semi-passive)
+lookout enumerate suspicious-domain.com
+
+# Step 6: Scan for phishing panel paths (active — use proxy if needed)
+lookout dirscan suspicious-domain.com --proxy socks5://127.0.0.1:9050
+
+# Step 7: Pivot — investigate the hosting IP found in step 3
+lookout investigate 203.0.113.50
+
+# Step 8: Generate final report
+lookout investigate suspicious-domain.com --format docx --output reports/report.docx
+```
+
+When you run commands inside a case directory (created with `lookout new`), results are automatically saved and the case file is updated.
+
 ## Output Formats
 
 ```bash
-# Table (default) - human-readable overview
+# Table (default) - human-readable overview in the terminal
 lookout investigate example.com
 
 # JSON - for further processing or scripting
-lookout investigate example.com --format json
-
-# Markdown - for reports and documentation
-lookout investigate example.com --format markdown
-
-# Save to file
 lookout investigate example.com --format json --output report.json
+
+# Markdown - for documentation and sharing
+lookout investigate example.com --format markdown --output report.md
+
+# Word (.docx) - professional report for case files
+lookout investigate example.com --format docx --output report.docx
 ```
+
+| Format | Best for |
+|--------|----------|
+| **Table** | Quick look in the terminal |
+| **JSON** | Scripting, data processing, archiving |
+| **Markdown** | Notes, wikis, text-based reports |
+| **Word (.docx)** | Formal reports, case files, sharing with non-technical readers |
 
 ## OPSEC — Know What Each Command Does
 

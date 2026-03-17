@@ -14,10 +14,11 @@ This guide walks you through everything from installation to your first investig
 6. [Understanding the Output](#6-understanding-the-output)
 7. [All Commands](#7-all-commands)
 8. [Saving Reports](#8-saving-reports)
-9. [Cache Management](#9-cache-management)
-10. [Troubleshooting](#10-troubleshooting)
-11. [OPSEC & Privacy](#11-opsec--privacy)
-12. [Proxy Setup Guide](#12-proxy-setup-guide)
+9. [Working with Cases](#9-working-with-cases)
+10. [Cache Management](#10-cache-management)
+11. [Troubleshooting](#11-troubleshooting)
+12. [OPSEC & Privacy](#12-opsec--privacy)
+13. [Proxy Setup Guide](#13-proxy-setup-guide)
 
 ---
 
@@ -349,6 +350,32 @@ This shows all available fields from each source (registrar, ASN, nameservers, e
 
 ## 8. Saving Reports
 
+Lookout supports four output formats:
+
+| Format | Flag | Best for |
+|--------|------|----------|
+| Table | *(default)* | Quick terminal overview |
+| JSON | `--format json` | Scripting, archiving, data processing |
+| Markdown | `--format markdown` | Notes, wikis, text reports |
+| **Word (.docx)** | `--format docx` | **Formal reports, case files, sharing with management** |
+
+### Save as Word document (recommended for case files)
+
+```bash
+lookout investigate example.com --format docx --output report.docx
+```
+
+The Word report includes:
+- Executive summary in plain language
+- Risk assessment with score
+- Key findings as bullet points
+- Recommendations
+- Timeline of events
+- Related indicators / pivot suggestions
+- Data sources used
+
+Formatted in Calibri 11pt, black and white — ready to print or attach to a case file.
+
 ### Save as JSON (for further processing)
 
 ```bash
@@ -361,19 +388,95 @@ lookout investigate example.com --format json --output report.json
 lookout investigate example.com --format markdown --output report.md
 ```
 
-### Multiple investigations
+---
 
-You can run multiple investigations one after another:
+## 9. Working with Cases
+
+Lookout has a built-in case management system to keep your investigations organized.
+
+### Create a new case
 
 ```bash
-lookout investigate domain1.com --format json --output domain1.json
-lookout investigate domain2.com --format json --output domain2.json
-lookout investigate 1.2.3.4 --format json --output ip_report.json
+lookout new "phishing-example-com" -d "Suspicious domain reported by user"
 ```
+
+This creates a directory structure:
+
+```
+phishing-example-com/
+├── reports/          # Investigation reports (docx, md, json)
+├── data/             # Enumeration results, raw data
+├── evidence/         # Screenshots, samples, exports
+└── case.json         # Case metadata and investigated indicators
+```
+
+### Work inside a case
+
+When you `cd` into a case directory, Lookout automatically detects it and saves results to the right location:
+
+```bash
+cd phishing-example-com
+
+# Results auto-saved to reports/ and case.json is updated
+lookout investigate suspicious-domain.com
+
+# Enumeration data auto-saved to data/
+lookout enumerate suspicious-domain.com
+
+# Dirscan data auto-saved to data/
+lookout dirscan suspicious-domain.com --proxy socks5://127.0.0.1:9050
+```
+
+You can also explicitly specify a case directory from anywhere:
+
+```bash
+lookout investigate example.com --case /path/to/phishing-example-com
+```
+
+### Recommended investigation workflow
+
+Here is the recommended order for a typical domain investigation:
+
+```
+Step 1: lookout new "case-name"
+        Create a case directory
+            │
+Step 2: lookout investigate <domain>
+        Passive — queries APIs, target cannot see you
+        → Shows risk score, key findings, pivot suggestions
+            │
+Step 3: lookout enumerate <domain>
+        Semi-passive — DNS + crt.sh
+        → Shows subdomains and IP clustering
+            │
+Step 4: lookout investigate <IP>
+        Passive — pivot on the hosting IP
+        → Shows Shodan ports/CVEs, reverse DNS, ASN info
+            │
+Step 5: lookout dirscan <domain> [--proxy ...]
+        Active — direct HTTP to target (use proxy!)
+        → Shows exposed panels, config files, webshells
+            │
+Step 6: lookout investigate <subdomain>
+        Passive — check interesting subdomains
+        → Repeat for cpanel, mail, admin subdomains
+            │
+Step 7: Generate report
+        lookout investigate <domain> --format docx -o reports/final.docx
+```
+
+After each command, Lookout shows **"Next steps"** with suggested follow-up commands. Follow the suggestions that make sense for your case.
+
+### Tips
+
+- **Start passive, end active**: Always do `investigate` first (invisible to target), `dirscan` last (visible)
+- **Use the pivots**: When Lookout suggests a pivot (IP, subdomain, ASN), follow it
+- **Save as you go**: Inside a case directory, results are saved automatically
+- **Generate the report last**: Run `investigate` with `--format docx` after you have all findings cached — the report includes everything
 
 ---
 
-## 9. Cache Management
+## 10. Cache Management
 
 Lookout caches results locally in a SQLite database (`data/cache.db`). This avoids hitting API rate limits when you investigate the same indicator multiple times.
 
@@ -407,7 +510,7 @@ lookout cache clear --yes
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 ### "command not found: lookout"
 
@@ -467,7 +570,7 @@ If you have an older version, download the latest from [python.org](https://www.
 
 ---
 
-## 11. OPSEC & Privacy
+## 12. OPSEC & Privacy
 
 **This section is important. Read it before running any command against a live target.**
 
@@ -566,7 +669,7 @@ If you only need to know what's on a domain, `lookout investigate` and `lookout 
 
 ---
 
-## 12. Proxy Setup Guide
+## 13. Proxy Setup Guide
 
 ### Why use a proxy?
 

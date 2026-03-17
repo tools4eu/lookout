@@ -6,6 +6,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from docx import Document
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Cm, Inches, Pt
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from osint.core.config import Settings, get_settings, find_project_root
@@ -404,6 +408,250 @@ class ReportGenerator:
         """Render report as JSON."""
         return report.model_dump_json(indent=2)
 
+    def to_docx(self, report: InvestigationReport) -> Document:
+        """Render report as a Word document.
+
+        Args:
+            report: The investigation report to render.
+
+        Returns:
+            A python-docx Document object.
+        """
+        doc = Document()
+
+        # ------------------------------------------------------------------ #
+        # Page margins                                                         #
+        # ------------------------------------------------------------------ #
+        for section in doc.sections:
+            section.top_margin = Cm(2.54)
+            section.bottom_margin = Cm(2.54)
+            section.left_margin = Cm(2.54)
+            section.right_margin = Cm(2.54)
+
+        # ------------------------------------------------------------------ #
+        # Helper: apply Calibri font to a paragraph run                       #
+        # ------------------------------------------------------------------ #
+        def _set_run_font(run, size_pt: int, bold: bool = False) -> None:
+            run.font.name = "Calibri"
+            run.font.size = Pt(size_pt)
+            run.font.bold = bold
+            run.font.color.rgb = None  # inherit (black)
+
+        def _heading(text: str, level_pt: int) -> None:
+            """Add a heading paragraph styled in Calibri bold."""
+            para = doc.add_paragraph()
+            run = para.add_run(text)
+            _set_run_font(run, level_pt, bold=True)
+            para.paragraph_format.space_before = Pt(12)
+            para.paragraph_format.space_after = Pt(4)
+
+        def _body(text: str) -> None:
+            """Add a normal body paragraph."""
+            para = doc.add_paragraph()
+            run = para.add_run(text)
+            _set_run_font(run, 11)
+            para.paragraph_format.space_after = Pt(4)
+
+        # ------------------------------------------------------------------ #
+        # 1. Title                                                             #
+        # ------------------------------------------------------------------ #
+        title_para = doc.add_paragraph()
+        title_run = title_para.add_run(
+            f"Investigation Report: {report.indicator_value}"
+        )
+        _set_run_font(title_run, 16, bold=True)
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        title_para.paragraph_format.space_after = Pt(16)
+
+        # ------------------------------------------------------------------ #
+        # 2. Metadata table                                                    #
+        # ------------------------------------------------------------------ #
+        _heading("Report Details", 14)
+
+        meta_table = doc.add_table(rows=5, cols=2)
+        meta_table.style = "Table Grid"
+        meta_rows = [
+            ("Report ID", report.report_id),
+            ("Date", report.created_at.strftime("%Y-%m-%d %H:%M UTC")),
+            ("Indicator Type", report.indicator_type.value),
+            ("Risk Level", report.risk_level.value.upper()),
+            (
+                "Risk Score",
+                f"{report.risk_score:.0f}/100" if report.risk_score is not None else "N/A",
+            ),
+        ]
+        for i, (label, value) in enumerate(meta_rows):
+            label_cell = meta_table.rows[i].cells[0]
+            value_cell = meta_table.rows[i].cells[1]
+            # Label (bold)
+            label_para = label_cell.paragraphs[0]
+            label_run = label_para.add_run(label)
+            _set_run_font(label_run, 11, bold=True)
+            # Value
+            value_para = value_cell.paragraphs[0]
+            value_run = value_para.add_run(value)
+            _set_run_font(value_run, 11)
+        # Column widths
+        for row in meta_table.rows:
+            row.cells[0].width = Cm(5)
+            row.cells[1].width = Cm(11)
+
+        doc.add_paragraph()  # spacer
+
+        # ------------------------------------------------------------------ #
+        # 3. Executive Summary                                                 #
+        # ------------------------------------------------------------------ #
+        _heading("Executive Summary", 14)
+        if report.executive_summary:
+            for line in report.executive_summary.splitlines():
+                _body(line) if line.strip() else doc.add_paragraph()
+
+        # ------------------------------------------------------------------ #
+        # 4. Risk Assessment                                                   #
+        # ------------------------------------------------------------------ #
+        _heading("Risk Assessment", 14)
+        risk_text = (
+            f"{report.risk_level.value.upper()}"
+            + (f" (score: {report.risk_score:.0f}/100)" if report.risk_score is not None else "")
+        )
+        _body(risk_text)
+        if report.risk_summary:
+            _body(report.risk_summary)
+
+        # ------------------------------------------------------------------ #
+        # 5. Key Findings                                                      #
+        # ------------------------------------------------------------------ #
+        _heading("Key Findings", 14)
+        if report.key_findings:
+            for finding in report.key_findings:
+                para = doc.add_paragraph(style="List Bullet")
+                run = para.add_run(finding)
+                _set_run_font(run, 11)
+        else:
+            _body("No key findings recorded.")
+
+        # ------------------------------------------------------------------ #
+        # 6. Recommendations                                                   #
+        # ------------------------------------------------------------------ #
+        _heading("Recommendations", 14)
+        if report.recommendations:
+            for idx, rec in enumerate(report.recommendations, start=1):
+                para = doc.add_paragraph(style="List Number")
+                run = para.add_run(rec)
+                _set_run_font(run, 11)
+        else:
+            _body("No recommendations recorded.")
+
+        # ------------------------------------------------------------------ #
+        # 7. Timeline (only if populated)                                      #
+        # ------------------------------------------------------------------ #
+        if report.timeline:
+            _heading("Timeline", 14)
+            tl_headers = ["Date", "Source", "Event", "Description"]
+            tl_table = doc.add_table(rows=1 + len(report.timeline), cols=4)
+            tl_table.style = "Table Grid"
+            # Header row
+            hdr_cells = tl_table.rows[0].cells
+            for col, header in enumerate(tl_headers):
+                para = hdr_cells[col].paragraphs[0]
+                run = para.add_run(header)
+                _set_run_font(run, 11, bold=True)
+            # Data rows
+            for row_idx, event in enumerate(report.timeline, start=1):
+                cells = tl_table.rows[row_idx].cells
+                values = [
+                    event.timestamp.strftime("%Y-%m-%d"),
+                    event.source,
+                    event.event_type,
+                    event.description,
+                ]
+                for col, val in enumerate(values):
+                    para = cells[col].paragraphs[0]
+                    run = para.add_run(val)
+                    _set_run_font(run, 11)
+            # Column widths
+            col_widths = [Cm(3), Cm(3), Cm(3.5), Cm(7)]
+            for row in tl_table.rows:
+                for col, width in enumerate(col_widths):
+                    row.cells[col].width = width
+
+            doc.add_paragraph()  # spacer
+
+        # ------------------------------------------------------------------ #
+        # 8. Related Indicators / Pivot Suggestions (only if populated)        #
+        # ------------------------------------------------------------------ #
+        if report.related_indicators:
+            _heading("Related Indicators / Pivot Suggestions", 14)
+            ri_headers = ["Type", "Value", "Relationship", "Source", "Confidence"]
+            ri_table = doc.add_table(rows=1 + len(report.related_indicators[:20]), cols=5)
+            ri_table.style = "Table Grid"
+            # Header row
+            hdr_cells = ri_table.rows[0].cells
+            for col, header in enumerate(ri_headers):
+                para = hdr_cells[col].paragraphs[0]
+                run = para.add_run(header)
+                _set_run_font(run, 11, bold=True)
+            # Data rows
+            for row_idx, rel in enumerate(report.related_indicators[:20], start=1):
+                cells = ri_table.rows[row_idx].cells
+                values = [
+                    rel.indicator_type.value,
+                    rel.value,
+                    rel.relationship,
+                    rel.source,
+                    f"{rel.confidence:.0%}",
+                ]
+                for col, val in enumerate(values):
+                    para = cells[col].paragraphs[0]
+                    run = para.add_run(val)
+                    _set_run_font(run, 11)
+            # Column widths
+            col_widths = [Cm(2.5), Cm(5), Cm(3.5), Cm(3), Cm(2.5)]
+            for row in ri_table.rows:
+                for col, width in enumerate(col_widths):
+                    row.cells[col].width = width
+
+            doc.add_paragraph()  # spacer
+
+        # ------------------------------------------------------------------ #
+        # 9. Data Sources                                                      #
+        # ------------------------------------------------------------------ #
+        _heading("Data Sources", 14)
+        _body(f"Queried: {', '.join(report.sources_queried) if report.sources_queried else 'None'}")
+        _body(
+            f"With data: {', '.join(report.sources_with_data) if report.sources_with_data else 'None'}"
+        )
+
+        # ------------------------------------------------------------------ #
+        # 10. Footer                                                           #
+        # ------------------------------------------------------------------ #
+        doc.add_paragraph()
+        footer_para = doc.add_paragraph()
+        footer_run = footer_para.add_run("Generated by Lookout")
+        footer_run.font.name = "Calibri"
+        footer_run.font.size = Pt(9)
+        footer_run.font.italic = True
+        footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        return doc
+
+    def save_docx(self, report: InvestigationReport, output_path: Path) -> Path:
+        """Save report as a Word document.
+
+        Args:
+            report: The investigation report to save.
+            output_path: Destination path (extension added if absent).
+
+        Returns:
+            Path to the saved .docx file.
+        """
+        doc = self.to_docx(report)
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(".docx")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(output_path))
+        return output_path
+
     def save_report(
         self,
         report: InvestigationReport,
@@ -416,7 +664,7 @@ class ReportGenerator:
         Args:
             report: The report to save
             output_path: Output file path
-            format: Output format (markdown, json)
+            format: Output format (markdown, json, docx)
 
         Returns:
             Path to saved file
@@ -425,12 +673,15 @@ class ReportGenerator:
             content = self.to_json(report)
             if not output_path.suffix:
                 output_path = output_path.with_suffix(".json")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content)
+            return output_path
+        elif format == "docx":
+            return self.save_docx(report, output_path)
         else:
             content = self.to_markdown(report)
             if not output_path.suffix:
                 output_path = output_path.with_suffix(".md")
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(content)
-
-        return output_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content)
+            return output_path
